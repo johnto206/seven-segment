@@ -8,15 +8,114 @@ from sys import stdout
 from os import path
 from re import compile
 from argparse import ArgumentParser
+from time import monotonic
 
 from .display import *
 from .clock import Clock
+
+
+def run_timer(start_seconds):
+    """Run a MM:SS countdown. The button stops the alarm after it reaches zero."""
+    remaining_seconds = start_seconds
+    start_time = monotonic()
+    was_pressed = False
+    led_on = False
+    last_led_toggle = monotonic()
+
+    print("Running 'timer' mode ...")
+    while True:
+        now = monotonic()
+        elapsed = int(now - start_time)
+        remaining_seconds = max(0, start_seconds - elapsed)
+
+        minutes = remaining_seconds // 60
+        seconds = remaining_seconds % 60
+        digits = f"{minutes:02d}{seconds:02d}"
+
+        # Blink the colon every half second.
+        set_colon(int(now * 2) % 2 == 0)
+
+        if remaining_seconds == 0:
+            if now - last_led_toggle >= 0.5:
+                led_on = not led_on
+                set_led(led_on)
+                last_led_toggle = now
+        else:
+            set_led(False)
+
+        # A button event is recognized on release, not while it is held.
+        pressed = get_button_pressed()
+        button_released = was_pressed and not pressed
+        was_pressed = pressed
+
+        activate_displays(digits, set_colon=int(now * 2) % 2 == 0)
+
+        if remaining_seconds == 0 and button_released:
+            set_led(False)
+            set_colon(False)
+            break
+
+
+def run_stopwatch():
+    """Run the three-state stopwatch: reset, running, and stopped."""
+    state = "reset"
+    elapsed_tenths = 0
+    start_time = 0.0
+    was_pressed = False
+    led_on = False
+    last_led_toggle = monotonic()
+
+    print("Running 'stopwatch' mode ...")
+    while True:
+        now = monotonic()
+
+        # Change state only after a complete press-and-release.
+        pressed = get_button_pressed()
+        button_released = was_pressed and not pressed
+        was_pressed = pressed
+
+        if button_released:
+            if state == "reset":
+                state = "running"
+                start_time = now
+                last_led_toggle = now
+                led_on = False
+            elif state == "running":
+                elapsed_tenths = min(9999, int((now - start_time) * 10))
+                state = "stopped"
+                led_on = True
+            else:
+                state = "reset"
+                elapsed_tenths = 0
+                led_on = False
+
+        if state == "running":
+            elapsed_tenths = min(9999, int((now - start_time) * 10))
+            if now - last_led_toggle >= 0.5:
+                led_on = not led_on
+                last_led_toggle = now
+        elif state == "stopped":
+            led_on = True
+        else:
+            elapsed_tenths = 0
+            led_on = False
+
+        # Four digits show seconds to one decimal place (000.0 to 999.9).
+        whole_seconds = elapsed_tenths // 10
+        tenths = elapsed_tenths % 10
+        digits = f"{whole_seconds:03d}{tenths}"
+
+        set_led(led_on)
+        set_colon(False)
+        activate_displays(digits, decimal_point=[False, False, True, False])
+        sleep(0.01)
 
 
 def main():
     clock = None
     channels_set = False
     clock_pattern = compile(r"([12]?)(\d):([0-5])(\d)")
+    timer_pattern = compile(r"(\d{1,2}):([0-5]\d)")
 
     try:
         parser = ArgumentParser(description='Seven-Segment Clock Display')
@@ -41,7 +140,16 @@ def main():
 
         args = parser.parse_args()
 
-        # Setup and Initialize the GPIO pins
+        timer_seconds = None
+        if args.mode == 'timer':
+            if args.timerstart is None:
+                raise ValueError("Timer mode requires --timerstart MM:SS (or -t MM:SS)")
+            match = timer_pattern.fullmatch(args.timerstart)
+            if match is None:
+                raise ValueError("Invalid timer start. Use MM:SS with seconds from 00 to 59")
+            timer_seconds = int(match.group(1)) * 60 + int(match.group(2))
+
+        # Setup and Initialize the GPIO pins after validating arguments.
         init_display(channels_set)
 
         if args.mode == 'clock':
@@ -72,12 +180,10 @@ def main():
                 sleep(1.0)
 
         elif args.mode == 'stopwatch':
-            # ADD YOUR CODE HERE (then remove 'pass')
-            pass
+            run_stopwatch()
 
         elif args.mode == 'timer':
-            # ADD YOUR CODE HERE (then remove 'pass')
-            pass
+            run_timer(timer_seconds)
 
         else:   # args.mode == 'freeform'
 
@@ -115,10 +221,10 @@ def main():
                 print("not a number")
 
             # Parse anything else
-            valid_char = ''.join(list(SEGS_FOR_CHAR.keys())).replace("-", "\\-").replace("[","\[").replace("]","\]")
+            valid_char = ''.join(list(SEGS_FOR_CHAR.keys())).replace("-", "\\-").replace("[","\\[").replace("]","\\]")
             print(valid_char)
             pattern = compile(
-                rf"([{valid_char}])?(\.)?([{valid_char}])?(\.)?(:)?([{valid_char}])?(\.)?(')?([{valid_char}])?(\.)?")
+                rf"([{valid_char}])?(\\.)?([{valid_char}])?(\\.)?(:)?([{valid_char}])?(\\.)?(')?([{valid_char}])?(\\.)?")
             m = pattern.match(string)
             if m is None:
                 pass
