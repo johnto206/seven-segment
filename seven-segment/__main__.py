@@ -8,107 +8,131 @@ from sys import stdout
 from os import path
 from re import compile
 from argparse import ArgumentParser
-from time import monotonic
+from time import monotonic, sleep
+from threading import Thread, Event
 
 from .display import *
 from .clock import Clock
 
 
+
+class LedBlinkThread(Thread):
+    """Blink the LED independently until stop() is called."""
+    def __init__(self, interval=0.5):
+        super().__init__()
+        self.interval = interval
+        self.stop_event = Event()
+        self.led_state = False
+
+    def run(self):
+        try:
+            while not self.stop_event.is_set():
+                self.led_state = not self.led_state
+                set_led(self.led_state)
+                self.stop_event.wait(self.interval)
+        finally:
+            self.led_state = False
+            set_led(False)
+
+    def stop(self):
+        self.stop_event.set()
+
+
+def stop_led_thread(worker):
+    """Stop a blinking LED thread and wait for it to finish."""
+    if worker is not None:
+        worker.stop()
+        worker.join()
+
+
 def run_timer(start_seconds):
-    """Run a MM:SS countdown. The button stops the alarm after it reaches zero."""
-    remaining_seconds = start_seconds
+    """Count down in MM:SS and blink the LED when the timer reaches zero."""
     start_time = monotonic()
     was_pressed = False
-    led_on = False
-    last_led_toggle = monotonic()
+    led_thread = None
 
     print("Running 'timer' mode ...")
-    while True:
-        now = monotonic()
-        elapsed = int(now - start_time)
-        remaining_seconds = max(0, start_seconds - elapsed)
+    try:
+        while True:
+            now = monotonic()
+            elapsed = int(now - start_time)
+            remaining = max(0, start_seconds - elapsed)
 
-        minutes = remaining_seconds // 60
-        seconds = remaining_seconds % 60
-        digits = f"{minutes:02d}{seconds:02d}"
+            minutes = remaining // 60
+            seconds = remaining % 60
+            digits = f"{minutes:02d}{seconds:02d}"
+            colon_on = int(now * 2) % 2 == 0
 
-        # Blink the colon every half second.
-        set_colon(int(now * 2) % 2 == 0)
+            if remaining == 0 and led_thread is None:
+                led_thread = LedBlinkThread(interval=0.5)
+                led_thread.start()
 
-        if remaining_seconds == 0:
-            if now - last_led_toggle >= 0.5:
-                led_on = not led_on
-                set_led(led_on)
-                last_led_toggle = now
-        else:
-            set_led(False)
+            pressed = get_button_pressed()
+            button_released = was_pressed and not pressed
+            was_pressed = pressed
 
-        # A button event is recognized on release, not while it is held.
-        pressed = get_button_pressed()
-        button_released = was_pressed and not pressed
-        was_pressed = pressed
+            activate_displays(digits, set_colon=colon_on)
 
-        activate_displays(digits, set_colon=int(now * 2) % 2 == 0)
+            if remaining == 0 and button_released:
+                break
 
-        if remaining_seconds == 0 and button_released:
-            set_led(False)
-            set_colon(False)
-            break
+            sleep(0.01)
+    finally:
+        stop_led_thread(led_thread)
+        set_led(False)
+        set_colon(False)
 
 
 def run_stopwatch():
-    """Run the three-state stopwatch: reset, running, and stopped."""
+    """Stopwatch states: reset, running, and stopped."""
     state = "reset"
     elapsed_tenths = 0
     start_time = 0.0
     was_pressed = False
-    led_on = False
-    last_led_toggle = monotonic()
+    led_thread = None
 
     print("Running 'stopwatch' mode ...")
-    while True:
-        now = monotonic()
+    try:
+        while True:
+            now = monotonic()
 
-        # Change state only after a complete press-and-release.
-        pressed = get_button_pressed()
-        button_released = was_pressed and not pressed
-        was_pressed = pressed
+            pressed = get_button_pressed()
+            button_released = was_pressed and not pressed
+            was_pressed = pressed
 
-        if button_released:
-            if state == "reset":
-                state = "running"
-                start_time = now
-                last_led_toggle = now
-                led_on = False
-            elif state == "running":
+            if button_released:
+                if state == "reset":
+                    state = "running"
+                    start_time = now
+                    led_thread = LedBlinkThread(interval=0.5)
+                    led_thread.start()
+                elif state == "running":
+                    elapsed_tenths = min(9999, int((now - start_time) * 10))
+                    state = "stopped"
+                    stop_led_thread(led_thread)
+                    led_thread = None
+                    set_led(True)
+                else:
+                    state = "reset"
+                    elapsed_tenths = 0
+                    set_led(False)
+
+            if state == "running":
                 elapsed_tenths = min(9999, int((now - start_time) * 10))
-                state = "stopped"
-                led_on = True
-            else:
-                state = "reset"
+            elif state == "reset":
                 elapsed_tenths = 0
-                led_on = False
 
-        if state == "running":
-            elapsed_tenths = min(9999, int((now - start_time) * 10))
-            if now - last_led_toggle >= 0.5:
-                led_on = not led_on
-                last_led_toggle = now
-        elif state == "stopped":
-            led_on = True
-        else:
-            elapsed_tenths = 0
-            led_on = False
+            whole_seconds = elapsed_tenths // 10
+            tenths = elapsed_tenths % 10
+            digits = f"{whole_seconds:03d}{tenths}"
 
-        # Four digits show seconds to one decimal place (000.0 to 999.9).
-        whole_seconds = elapsed_tenths // 10
-        tenths = elapsed_tenths % 10
-        digits = f"{whole_seconds:03d}{tenths}"
-
-        set_led(led_on)
+            set_colon(False)
+            activate_displays(digits, decimal_point=[False, False, True, False])
+            sleep(0.01)
+    finally:
+        stop_led_thread(led_thread)
+        set_led(False)
         set_colon(False)
-        activate_displays(digits, decimal_point=[False, False, True, False])
-        sleep(0.01)
 
 
 def main():
